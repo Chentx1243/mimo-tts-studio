@@ -1,6 +1,8 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import multer from "multer";
 
 dotenv.config();
@@ -19,6 +21,8 @@ const allowedMimeTypes = new Set([
   "video/mp4"
 ]);
 const mimoEndpoint = "https://api.xiaomimimo.com/v1/chat/completions";
+const dataDir = path.resolve(process.cwd(), "data");
+const workspaceFilePath = path.join(dataDir, "workspaces.json");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -47,8 +51,24 @@ type MimoResponse = {
   }>;
 };
 
+type StoredWorkspace = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  nodes: unknown[];
+  edges: unknown[];
+  viewport?: unknown;
+};
+
+type WorkspaceStore = {
+  activeWorkspaceId: string | null;
+  workspaces: StoredWorkspace[];
+};
+
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+// 画板会持久化参考音频和生成产物的 data URL，本地工作站需要更高的 JSON 限制。
+app.use(express.json({ limit: "80mb" }));
 
 app.get("/api/status", (_req, res) => {
   res.json({
@@ -58,6 +78,106 @@ app.get("/api/status", (_req, res) => {
     maxAudioBytes,
     allowedMimeTypes: Array.from(allowedMimeTypes)
   });
+});
+
+app.get("/api/workspaces", async (_req, res, next) => {
+  try {
+    const store = await readWorkspaceStore();
+    res.json({
+      activeWorkspaceId: store.activeWorkspaceId,
+      workspaces: store.workspaces.map((workspace) => ({
+        id: workspace.id,
+        name: workspace.name,
+        createdAt: workspace.createdAt,
+        updatedAt: workspace.updatedAt,
+        nodeCount: workspace.nodes.length,
+        edgeCount: workspace.edges.length
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/workspaces/:id", async (req, res, next) => {
+  try {
+    const store = await readWorkspaceStore();
+    const workspace = store.workspaces.find((item) => item.id === req.params.id);
+    if (!workspace) {
+      return res.status(404).json({ error: "Workspace not found." });
+    }
+
+    res.json(workspace);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/workspaces", async (req, res, next) => {
+  try {
+    const store = await readWorkspaceStore();
+    const now = new Date().toISOString();
+    const workspace: StoredWorkspace = {
+      id: createId("board"),
+      name: normalizeWorkspaceName(req.body?.name),
+      createdAt: now,
+      updatedAt: now,
+      nodes: Array.isArray(req.body?.nodes) ? req.body.nodes : [],
+      edges: Array.isArray(req.body?.edges) ? req.body.edges : [],
+      viewport: req.body?.viewport
+    };
+
+    store.workspaces.unshift(workspace);
+    store.activeWorkspaceId = workspace.id;
+    await writeWorkspaceStore(store);
+    res.status(201).json(workspace);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/workspaces/:id", async (req, res, next) => {
+  try {
+    const store = await readWorkspaceStore();
+    const index = store.workspaces.findIndex((item) => item.id === req.params.id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Workspace not found." });
+    }
+
+    const current = store.workspaces[index];
+    const updated: StoredWorkspace = {
+      ...current,
+      name: normalizeWorkspaceName(req.body?.name ?? current.name),
+      updatedAt: new Date().toISOString(),
+      nodes: Array.isArray(req.body?.nodes) ? req.body.nodes : current.nodes,
+      edges: Array.isArray(req.body?.edges) ? req.body.edges : current.edges,
+      viewport: req.body?.viewport ?? current.viewport
+    };
+
+    store.workspaces[index] = updated;
+    store.activeWorkspaceId = updated.id;
+    await writeWorkspaceStore(store);
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/workspaces/:id", async (req, res, next) => {
+  try {
+    const store = await readWorkspaceStore();
+    const nextWorkspaces = store.workspaces.filter((item) => item.id !== req.params.id);
+    if (nextWorkspaces.length === store.workspaces.length) {
+      return res.status(404).json({ error: "Workspace not found." });
+    }
+
+    store.workspaces = nextWorkspaces;
+    store.activeWorkspaceId = store.activeWorkspaceId === req.params.id ? (nextWorkspaces[0]?.id ?? null) : store.activeWorkspaceId;
+    await writeWorkspaceStore(store);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/tts/voiceclone", upload.single("voice"), async (req: Request, res: Response, next: NextFunction) => {
@@ -278,4 +398,51 @@ function redactPayload(payload: MimoPayload, file: Express.Multer.File) {
 function formatBytes(bytes: number): string {
   const mb = bytes / 1024 / 1024;
   return `${mb.toFixed(1)} MB`;
+}
+
+async function readWorkspaceStore(): Promise<WorkspaceStore> {
+  try {
+    const raw = await readFile(workspaceFilePath, "utf-8");
+    const parsed = JSON.parse(raw) as WorkspaceStore;
+    return {
+      activeWorkspaceId: parsed.activeWorkspaceId ?? parsed.workspaces?.[0]?.id ?? null,
+      workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : []
+    };
+  } catch (error) {
+    const code = typeof error === "object" && error && "code" in error ? (error as { code?: string }).code : "";
+    if (code !== "ENOENT") {
+      throw error;
+    }
+
+    const now = new Date().toISOString();
+    const initial: WorkspaceStore = {
+      activeWorkspaceId: "board-initial",
+      workspaces: [
+        {
+          id: "board-initial",
+          name: "默认工作台",
+          createdAt: now,
+          updatedAt: now,
+          nodes: [],
+          edges: []
+        }
+      ]
+    };
+    await writeWorkspaceStore(initial);
+    return initial;
+  }
+}
+
+async function writeWorkspaceStore(store: WorkspaceStore): Promise<void> {
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(workspaceFilePath, JSON.stringify(store, null, 2), "utf-8");
+}
+
+function normalizeWorkspaceName(value: unknown): string {
+  const name = String(value || "").trim();
+  return name || `未命名工作台 ${new Date().toLocaleString("zh-CN", { hour12: false })}`;
+}
+
+function createId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
