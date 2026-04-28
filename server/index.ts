@@ -1,7 +1,7 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import multer from "multer";
 
@@ -63,6 +63,7 @@ type StoredWorkspace = {
   updatedAt: string;
   nodes: unknown[];
   edges: unknown[];
+  stashItems: unknown[];
   viewport?: unknown;
 };
 
@@ -178,7 +179,8 @@ app.get("/api/workspaces", async (_req, res, next) => {
         createdAt: workspace.createdAt,
         updatedAt: workspace.updatedAt,
         nodeCount: workspace.nodes.length,
-        edgeCount: workspace.edges.length
+        edgeCount: workspace.edges.length,
+        stashCount: workspace.stashItems.length
       }))
     });
   } catch (error) {
@@ -211,6 +213,7 @@ app.post("/api/workspaces", async (req, res, next) => {
       updatedAt: now,
       nodes: Array.isArray(req.body?.nodes) ? req.body.nodes : [],
       edges: Array.isArray(req.body?.edges) ? req.body.edges : [],
+      stashItems: Array.isArray(req.body?.stashItems) ? req.body.stashItems : [],
       viewport: req.body?.viewport
     };
 
@@ -238,6 +241,7 @@ app.put("/api/workspaces/:id", async (req, res, next) => {
       updatedAt: new Date().toISOString(),
       nodes: Array.isArray(req.body?.nodes) ? req.body.nodes : current.nodes,
       edges: Array.isArray(req.body?.edges) ? req.body.edges : current.edges,
+      stashItems: Array.isArray(req.body?.stashItems) ? req.body.stashItems : current.stashItems,
       viewport: req.body?.viewport ?? current.viewport
     };
 
@@ -496,11 +500,7 @@ function formatBytes(bytes: number): string {
 async function readWorkspaceStore(): Promise<WorkspaceStore> {
   try {
     const raw = await readFile(workspaceFilePath, "utf-8");
-    const parsed = JSON.parse(raw) as WorkspaceStore;
-    return {
-      activeWorkspaceId: parsed.activeWorkspaceId ?? parsed.workspaces?.[0]?.id ?? null,
-      workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : []
-    };
+    return normalizeWorkspaceStore(parseWorkspaceStore(raw));
   } catch (error) {
     const code = typeof error === "object" && error && "code" in error ? (error as { code?: string }).code : "";
     if (code !== "ENOENT") {
@@ -517,7 +517,8 @@ async function readWorkspaceStore(): Promise<WorkspaceStore> {
           createdAt: now,
           updatedAt: now,
           nodes: [],
-          edges: []
+          edges: [],
+          stashItems: []
         }
       ]
     };
@@ -528,7 +529,71 @@ async function readWorkspaceStore(): Promise<WorkspaceStore> {
 
 async function writeWorkspaceStore(store: WorkspaceStore): Promise<void> {
   await mkdir(dataDir, { recursive: true });
-  await writeFile(workspaceFilePath, JSON.stringify(store, null, 2), "utf-8");
+  const tempPath = `${workspaceFilePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, JSON.stringify(store, null, 2), "utf-8");
+  await rename(tempPath, workspaceFilePath);
+}
+
+function parseWorkspaceStore(raw: string): WorkspaceStore {
+  try {
+    return JSON.parse(raw) as WorkspaceStore;
+  } catch (error) {
+    const recovered = parseFirstJsonObject(raw);
+    if (recovered) {
+      return recovered as WorkspaceStore;
+    }
+
+    throw error;
+  }
+}
+
+function parseFirstJsonObject(raw: string): unknown | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(raw.slice(0, index + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function normalizeWorkspaceStore(parsed: WorkspaceStore): WorkspaceStore {
+  const workspaces = Array.isArray(parsed.workspaces) ? parsed.workspaces.map(normalizeStoredWorkspace) : [];
+  return {
+    activeWorkspaceId: parsed.activeWorkspaceId ?? workspaces[0]?.id ?? null,
+    workspaces
+  };
 }
 
 function normalizeWorkspaceName(value: unknown): string {
@@ -538,4 +603,13 @@ function normalizeWorkspaceName(value: unknown): string {
 
 function createId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeStoredWorkspace(workspace: StoredWorkspace): StoredWorkspace {
+  return {
+    ...workspace,
+    nodes: Array.isArray(workspace.nodes) ? workspace.nodes : [],
+    edges: Array.isArray(workspace.edges) ? workspace.edges : [],
+    stashItems: Array.isArray(workspace.stashItems) ? workspace.stashItems : []
+  };
 }

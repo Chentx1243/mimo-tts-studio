@@ -212,6 +212,11 @@ h1 {
   margin: 12px 0;
 }
 
+.board-list-entry {
+  display: grid;
+  gap: 8px;
+}
+
 .board-item {
   min-height: 72px;
   align-items: flex-start;
@@ -231,6 +236,112 @@ h1 {
 .board-item.active {
   background: linear-gradient(135deg, rgba(197, 164, 93, 0.22), rgba(27, 25, 20, 0.95));
   border-color: rgba(226, 194, 119, 0.9);
+}
+
+.stash-panel {
+  border: 1px solid rgba(197, 164, 93, 0.18);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: rgba(8, 8, 7, 0.34);
+  overflow: hidden;
+  margin-top: -8px;
+}
+
+.stash-header {
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: rgba(197, 164, 93, 0.05);
+  color: #f2dfae;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 10px;
+}
+
+.stash-header span,
+.stash-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stash-chevron {
+  transition: transform 160ms ease;
+}
+
+.stash-chevron.open {
+  transform: rotate(180deg);
+}
+
+.stash-toolbar {
+  justify-content: space-between;
+  color: #9f947b;
+  font-size: 12px;
+}
+
+.stash-body {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+}
+
+.stash-download-all {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.stash-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px 28px 28px;
+  gap: 6px;
+  align-items: center;
+  min-height: 36px;
+  padding: 4px 6px 4px 9px;
+  border: 1px solid rgba(197, 164, 93, 0.14);
+  border-radius: 6px;
+  background: rgba(20, 19, 16, 0.52);
+}
+
+.stash-item strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #efe7cf;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stash-round-action {
+  width: 28px;
+  min-height: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  color: #ead9ad;
+  text-decoration: none;
+}
+
+a.stash-round-action {
+  border: 1px solid rgba(197, 164, 93, 0.38);
+  background: rgba(24, 23, 19, 0.92);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+a.stash-round-action:hover {
+  border-color: rgba(226, 194, 119, 0.85);
+  background: rgba(42, 37, 28, 0.96);
+  transform: translateY(-1px);
 }
 
 .canvas-panel {
@@ -478,6 +589,12 @@ h1 {
   display: grid;
   gap: 4px;
   margin: 10px 0;
+}
+
+.artifact-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .download-link {

@@ -25,6 +25,7 @@ import {
   AlertTriangle,
   Archive,
   AudioLines,
+  ChevronDown,
   Download,
   FileAudio,
   Loader2,
@@ -39,6 +40,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, MouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getBezierPath } from "@xyflow/react";
+import JSZip from "jszip";
 
 type StatusResponse = {
   ok: boolean;
@@ -55,6 +57,7 @@ type WorkspaceSummary = {
   updatedAt: string;
   nodeCount: number;
   edgeCount: number;
+  stashCount: number;
 };
 
 type WorkspacePayload = {
@@ -64,6 +67,7 @@ type WorkspacePayload = {
   updatedAt: string;
   nodes: StudioNode[];
   edges: StudioEdge[];
+  stashItems: StashItem[];
 };
 
 type WorkspacesResponse = {
@@ -90,6 +94,10 @@ type ArtifactData = {
   sourceNodeName: string;
 };
 
+type StashItem = ArtifactData & {
+  id: string;
+};
+
 type NodeData = {
   title: string;
   text?: string;
@@ -102,6 +110,8 @@ type NodeData = {
   onDelete?: (nodeId: string) => void;
   onRunClone?: (nodeId: string) => void;
   onOptimizeStyle?: (nodeId: string) => void;
+  onStashArtifact?: (artifact: ArtifactData) => void;
+  isArtifactStashed?: (artifact: ArtifactData) => boolean;
 };
 
 type DebugResponse = {
@@ -155,6 +165,8 @@ const nodeCatalog: Record<
   }
 };
 
+const autoSaveDelayMs = 5000;
+
 const allowedAudioTypes = new Set(["audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "video/mp4"]);
 const maxAudioBytes = Math.floor(7.5 * 1024 * 1024);
 
@@ -175,6 +187,7 @@ function StudioApp() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<StudioEdge>([]);
   const [menu, setMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isStashOpen, setIsStashOpen] = useState(false);
   const flowRef = useRef<ReactFlowInstance<StudioNode, StudioEdge> | null>(null);
   const saveTimerRef = useRef<number | null>(null);
 
@@ -194,24 +207,26 @@ function StudioApp() {
 
     saveTimerRef.current = window.setTimeout(() => {
       void saveWorkspace();
-    }, 900);
+    }, autoSaveDelayMs);
 
     return () => {
       if (saveTimerRef.current) {
         window.clearTimeout(saveTimerRef.current);
       }
     };
-    // 仅监听画布结构和节点数据变化，避免保存函数引用。
-  }, [nodes, edges]);
+    // 仅监听画布结构、节点数据和暂存列表变化，避免保存函数引用。
+  }, [nodes, edges, activeWorkspace?.stashItems]);
 
   const nodeCallbacks = useMemo(
     () => ({
       onPatch: patchNode,
       onDelete: deleteNode,
       onRunClone: runVoiceClone,
-      onOptimizeStyle: optimizeVoiceStyle
+      onOptimizeStyle: optimizeVoiceStyle,
+      onStashArtifact: stashArtifact,
+      isArtifactStashed
     }),
-    [nodes, edges, status?.apiKeyConfigured]
+    [nodes, edges, status?.apiKeyConfigured, activeWorkspace?.stashItems]
   );
 
   const hydratedNodes = useMemo(() => {
@@ -268,9 +283,13 @@ function StudioApp() {
 
   async function loadWorkspaceList(preferredId?: string) {
     const response = await fetch("/api/workspaces");
+    if (!response.ok) {
+      throw new Error(`加载画板列表失败：HTTP ${response.status}`);
+    }
     const payload = (await response.json()) as WorkspacesResponse;
-    setWorkspaces(payload.workspaces);
-    const targetId = preferredId ?? payload.activeWorkspaceId ?? payload.workspaces[0]?.id;
+    const workspaceItems = Array.isArray(payload.workspaces) ? payload.workspaces : [];
+    setWorkspaces(workspaceItems);
+    const targetId = preferredId ?? payload.activeWorkspaceId ?? workspaceItems[0]?.id;
     if (targetId) {
       await loadWorkspace(targetId);
     }
@@ -278,8 +297,11 @@ function StudioApp() {
 
   async function loadWorkspace(id: string) {
     const response = await fetch(`/api/workspaces/${id}`);
+    if (!response.ok) {
+      throw new Error(`加载画板失败：HTTP ${response.status}`);
+    }
     const workspace = (await response.json()) as WorkspacePayload;
-    setActiveWorkspace(workspace);
+    setActiveWorkspace({ ...workspace, stashItems: workspace.stashItems ?? [] });
     setNodes(workspace.nodes ?? []);
     setEdges(workspace.edges ?? []);
   }
@@ -289,7 +311,7 @@ function StudioApp() {
     const response = await fetch("/api/workspaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, nodes: [], edges: [] })
+      body: JSON.stringify({ name, nodes: [], edges: [], stashItems: [] })
     });
     const workspace = (await response.json()) as WorkspacePayload;
     await loadWorkspaceList(workspace.id);
@@ -320,7 +342,8 @@ function StudioApp() {
       body: JSON.stringify({
         name: activeWorkspace.name,
         nodes: cleanNodes,
-        edges
+        edges,
+        stashItems: activeWorkspace.stashItems ?? []
       })
     });
     const saved = (await response.json()) as WorkspacePayload;
@@ -328,7 +351,14 @@ function StudioApp() {
     setWorkspaces((items) =>
       items.map((item) =>
         item.id === saved.id
-          ? { ...item, name: saved.name, updatedAt: saved.updatedAt, nodeCount: saved.nodes.length, edgeCount: saved.edges.length }
+          ? {
+              ...item,
+              name: saved.name,
+              updatedAt: saved.updatedAt,
+              nodeCount: saved.nodes.length,
+              edgeCount: saved.edges.length,
+              stashCount: saved.stashItems.length
+            }
           : item
       )
     );
@@ -337,6 +367,36 @@ function StudioApp() {
 
   function patchWorkspaceName(name: string) {
     setActiveWorkspace((workspace) => (workspace ? { ...workspace, name } : workspace));
+  }
+
+  function stashArtifact(artifact: ArtifactData) {
+    if (!activeWorkspace || isArtifactStashed(artifact)) {
+      return;
+    }
+
+    const item: StashItem = {
+      id: createId("stash"),
+      ...artifact
+    };
+    setActiveWorkspace((workspace) => (workspace ? { ...workspace, stashItems: [item, ...(workspace.stashItems ?? [])] } : workspace));
+    setWorkspaces((items) => items.map((workspace) => (workspace.id === activeWorkspace.id ? { ...workspace, stashCount: workspace.stashCount + 1 } : workspace)));
+  }
+
+  function isArtifactStashed(artifact: ArtifactData) {
+    return Boolean(activeWorkspace?.stashItems?.some((item) => item.fileName === artifact.fileName && item.audioDataUrl === artifact.audioDataUrl));
+  }
+
+  function deleteStashItem(itemId: string) {
+    if (!activeWorkspace) {
+      return;
+    }
+
+    setActiveWorkspace((workspace) => (workspace ? { ...workspace, stashItems: workspace.stashItems.filter((item) => item.id !== itemId) } : workspace));
+    setWorkspaces((items) =>
+      items.map((workspace) =>
+        workspace.id === activeWorkspace.id ? { ...workspace, stashCount: Math.max(0, workspace.stashCount - 1) } : workspace
+      )
+    );
   }
 
   function patchNode(nodeId: string, patch: Partial<NodeData>) {
@@ -496,6 +556,28 @@ function StudioApp() {
     }
   }
 
+  async function downloadStashZip() {
+    const items = activeWorkspace?.stashItems ?? [];
+    if (!activeWorkspace || items.length === 0) {
+      return;
+    }
+
+    const zip = new JSZip();
+    const usedNames = new Map<string, number>();
+    for (const item of items) {
+      const safeName = getUniqueFileName(sanitizeFileName(item.fileName), usedNames);
+      zip.file(safeName, dataUrlToUint8Array(item.audioDataUrl));
+    }
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${sanitizeFileName(activeWorkspace.name)}-${formatDateForFile(new Date())}.zip`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <main className="studio-shell" onClick={() => setMenu(null)}>
       <header className="studio-topbar">
@@ -531,17 +613,27 @@ function StudioApp() {
           </button>
           <div className="board-list">
             {workspaces.map((workspace) => (
-              <button
-                className={workspace.id === activeWorkspace?.id ? "board-item active" : "board-item"}
-                key={workspace.id}
-                type="button"
-                onClick={() => void loadWorkspace(workspace.id)}
-              >
-                <strong>{workspace.name}</strong>
-                <span>
-                  {workspace.nodeCount} 节点 / {workspace.edgeCount} 连线
-                </span>
-              </button>
+              <div className="board-list-entry" key={workspace.id}>
+                <button
+                  className={workspace.id === activeWorkspace?.id ? "board-item active" : "board-item"}
+                  type="button"
+                  onClick={() => void loadWorkspace(workspace.id)}
+                >
+                  <strong>{workspace.name}</strong>
+                  <span>
+                    {workspace.nodeCount} 节点 / {workspace.edgeCount} 连线
+                  </span>
+                </button>
+                {workspace.id === activeWorkspace?.id && (activeWorkspace.stashItems?.length ?? 0) > 0 ? (
+                  <StashPanel
+                    isOpen={isStashOpen}
+                    items={activeWorkspace.stashItems ?? []}
+                    onBatchDownload={() => void downloadStashZip()}
+                    onDelete={deleteStashItem}
+                    onToggle={() => setIsStashOpen((value) => !value)}
+                  />
+                ) : null}
+              </div>
             ))}
           </div>
           <button className="danger subtle" type="button" onClick={() => void deleteWorkspace()} disabled={!activeWorkspace}>
@@ -699,6 +791,8 @@ function VoiceCloneNode({ id, data }: NodeProps<StudioNode>) {
 
 function ArtifactNode({ id, data }: NodeProps<StudioNode>) {
   const artifact = data.artifact;
+  const isStashed = artifact ? data.isArtifactStashed?.(artifact) : false;
+  const artifactForStash = artifact ? { ...artifact, sourceNodeName: data.title } : null;
 
   return (
     <StudioNodeFrame id={id} data={data} icon={<Archive size={17} />} tone="artifact">
@@ -710,10 +804,21 @@ function ArtifactNode({ id, data }: NodeProps<StudioNode>) {
             <span>{artifact.fileName}</span>
             <span>{artifact.elapsedMs} ms · {new Date(artifact.createdAt).toLocaleString("zh-CN", { hour12: false })}</span>
           </div>
-          <a className="download-link nodrag" href={artifact.audioDataUrl} download={artifact.fileName}>
-            <Download size={15} />
-            下载产物
-          </a>
+          <div className="artifact-actions">
+            <button
+              className="download-link nodrag"
+              type="button"
+              onClick={() => artifactForStash && data.onStashArtifact?.(artifactForStash)}
+              disabled={isStashed}
+            >
+              <Archive size={15} />
+              {isStashed ? "已暂存" : "暂存"}
+            </button>
+            <a className="download-link nodrag" href={artifact.audioDataUrl} download={artifact.fileName}>
+              <Download size={15} />
+              下载
+            </a>
+          </div>
         </>
       ) : (
         <p className="node-muted">等待音频克隆节点写入产物。</p>
@@ -790,6 +895,88 @@ function StatusPill({ status, error, onRefresh }: { status: StatusResponse | nul
     <button className={`status-pill ${tone}`} type="button" onClick={onRefresh}>
       {text}
     </button>
+  );
+}
+
+function StashPanel({
+  isOpen,
+  items,
+  onBatchDownload,
+  onDelete,
+  onToggle
+}: {
+  isOpen: boolean;
+  items: StashItem[];
+  onBatchDownload: () => void;
+  onDelete: (itemId: string) => void;
+  onToggle: () => void;
+}) {
+  return (
+    <section className="stash-panel">
+      <button className="stash-header" type="button" onClick={onToggle} aria-expanded={isOpen}>
+        <span>
+          <ChevronDown className={isOpen ? "stash-chevron open" : "stash-chevron"} size={14} />
+          暂存 {items.length}
+        </span>
+      </button>
+      {isOpen ? (
+        <div className="stash-body">
+          <div className="stash-toolbar">
+            <span>暂存 {items.length}</span>
+            <button className="stash-download-all" type="button" onClick={onBatchDownload}>
+              <Download size={13} />
+              批量下载 ZIP
+            </button>
+          </div>
+          {items.map((item) => (
+            <article className="stash-item" key={item.id}>
+              <strong title={item.sourceNodeName || item.fileName}>{item.sourceNodeName || item.fileName}</strong>
+              <StashMiniPlayer src={item.audioDataUrl} />
+              <a className="stash-round-action" href={item.audioDataUrl} download={item.fileName} title="下载暂存音频">
+                <Download size={13} />
+              </a>
+              <button className="stash-round-action nodrag" type="button" onClick={() => onDelete(item.id)} title="删除暂存">
+                <Trash2 size={13} />
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function StashMiniPlayer({ src }: { src: string }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  function togglePlay() {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    if (audio.paused) {
+      void audio.play();
+    } else {
+      audio.pause();
+    }
+  }
+
+  return (
+    <>
+      <audio
+        ref={audioRef}
+        src={src}
+        preload="metadata"
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => setIsPlaying(false)}
+      />
+      <button className="stash-round-action nodrag" type="button" onClick={togglePlay} title={isPlaying ? "暂停" : "播放"}>
+        {isPlaying ? <Pause size={13} /> : <Play size={13} />}
+      </button>
+    </>
   );
 }
 
@@ -926,6 +1113,8 @@ function resolveCloneInputs(cloneNode: StudioNode, nodes: StudioNode[], edges: S
 }
 
 function createArtifactNode(sourceNode: StudioNode, result: DebugResponse): StudioNode {
+  const artifactTitle = `产物 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+
   return {
     id: createId("artifact"),
     type: "artifact",
@@ -934,20 +1123,20 @@ function createArtifactNode(sourceNode: StudioNode, result: DebugResponse): Stud
       y: sourceNode.position.y + 36
     },
     data: {
-      title: `产物 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
+      title: artifactTitle,
       artifact: {
         fileName: result.fileName,
         audioDataUrl: result.audioDataUrl,
         elapsedMs: result.elapsedMs,
         createdAt: new Date().toISOString(),
-        sourceNodeName: sourceNode.data.title
+        sourceNodeName: artifactTitle
       }
     }
   };
 }
 
 function stripNodeCallbacks(node: StudioNode): StudioNode {
-  const { onPatch, onDelete, onRunClone, onOptimizeStyle, ...data } = node.data;
+  const { onPatch, onDelete, onRunClone, onOptimizeStyle, onStashArtifact, isArtifactStashed, ...data } = node.data;
   return { ...node, data };
 }
 
@@ -962,6 +1151,16 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType: string): Fil
   return new File([bytes], fileName, { type: resolvedMime });
 }
 
+function dataUrlToUint8Array(dataUrl: string): Uint8Array {
+  const base64 = dataUrl.split(",")[1] ?? "";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
 function guessMimeFromName(fileName: string): string {
   if (/\.wav$/i.test(fileName)) {
     return "audio/wav";
@@ -970,6 +1169,29 @@ function guessMimeFromName(fileName: string): string {
     return "audio/m4a";
   }
   return "audio/mp3";
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim() || "audio.wav";
+}
+
+function getUniqueFileName(fileName: string, usedNames: Map<string, number>): string {
+  const count = usedNames.get(fileName) ?? 0;
+  usedNames.set(fileName, count + 1);
+  if (count === 0) {
+    return fileName;
+  }
+
+  const dotIndex = fileName.lastIndexOf(".");
+  if (dotIndex === -1) {
+    return `${fileName}-${count + 1}`;
+  }
+
+  return `${fileName.slice(0, dotIndex)}-${count + 1}${fileName.slice(dotIndex)}`;
+}
+
+function formatDateForFile(date: Date): string {
+  return date.toISOString().replace(/[:.]/g, "-");
 }
 
 function createId(prefix: string): string {
