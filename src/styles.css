@@ -684,6 +684,7 @@ a.stash-round-action:hover {
   height: 12px;
   background: #c5a45d;
   border: 2px solid #090908;
+  z-index: 8;
 }
 
 .handle-voice {
@@ -696,6 +697,10 @@ a.stash-round-action:hover {
 
 .handle-text {
   top: 148px;
+}
+
+.handle-artifact-audio {
+  top: 62px;
 }
 
 .run-button {

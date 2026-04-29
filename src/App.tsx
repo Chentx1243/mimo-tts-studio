@@ -495,7 +495,10 @@ function StudioApp() {
       return;
     }
 
-    if (!resolved.text.trim()) {
+    const textItems = resolveCloneTextInputs(cloneNode, nodes, edges);
+    const cloneTexts = textItems.length > 0 ? textItems : [{ title: cloneNode.data.title, text: resolved.text }];
+
+    if (cloneTexts.every((item) => !item.text.trim())) {
       patchNode(nodeId, { error: "缺少音频文本，请连接提示词节点到「文本」输入或在节点中填写。" });
       return;
     }
@@ -503,37 +506,41 @@ function StudioApp() {
     patchNode(nodeId, { isRunning: true, error: undefined });
 
     try {
-      const formData = new FormData();
-      formData.append("voice", dataUrlToFile(resolved.audio.dataUrl, resolved.audio.fileName, resolved.audio.mimeType));
-      formData.append("text", resolved.text.trim());
-      formData.append("instruction", resolved.instruction.trim());
-      formData.append("format", "wav");
+      for (const [index, item] of cloneTexts.filter((entry) => entry.text.trim()).entries()) {
+        const formData = new FormData();
+        formData.append("voice", dataUrlToFile(resolved.audio.dataUrl, resolved.audio.fileName, resolved.audio.mimeType));
+        formData.append("text", item.text.trim());
+        formData.append("instruction", resolved.instruction.trim());
+        formData.append("format", "wav");
 
-      const response = await fetch("/api/tts/voiceclone", {
-        method: "POST",
-        body: formData
-      });
-      const payload = (await response.json()) as DebugResponse & { error?: string; details?: unknown };
+        const response = await fetch("/api/tts/voiceclone", {
+          method: "POST",
+          body: formData
+        });
+        const payload = (await response.json()) as DebugResponse & { error?: string; details?: unknown };
 
-      if (!response.ok) {
-        patchNode(nodeId, { isRunning: false, error: payload.error || "MiMo 生成失败。" });
-        return;
+        if (!response.ok) {
+          patchNode(nodeId, { isRunning: false, error: payload.error || `第 ${index + 1} 条音频克隆失败。` });
+          return;
+        }
+
+        const artifactNode = createArtifactNode(cloneNode, payload, item.title);
+        const artifactEdge: StudioEdge = {
+          id: createId("edge"),
+          source: cloneNode.id,
+          sourceHandle: "output",
+          target: artifactNode.id,
+          targetHandle: "artifact",
+          type: "deletable",
+          animated: true,
+          style: { stroke: "#c5a45d", strokeWidth: 2 }
+        };
+
+        setNodes((items) => items.concat(artifactNode));
+        setEdges((items) => items.concat(artifactEdge));
       }
 
-      const artifactNode = createArtifactNode(cloneNode, payload);
-      const artifactEdge: StudioEdge = {
-        id: createId("edge"),
-        source: cloneNode.id,
-        sourceHandle: "output",
-        target: artifactNode.id,
-        targetHandle: "artifact",
-        type: "deletable",
-        animated: true,
-        style: { stroke: "#c5a45d", strokeWidth: 2 }
-      };
-
-      setNodes((items) => items.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, isRunning: false, error: undefined } } : node)).concat(artifactNode));
-      setEdges((items) => items.concat(artifactEdge));
+      patchNode(nodeId, { isRunning: false, error: undefined });
     } catch (error) {
       patchNode(nodeId, { isRunning: false, error: error instanceof Error ? error.message : "请求失败。" });
     }
@@ -567,9 +574,6 @@ function StudioApp() {
     patchNode(nodeId, { isRunning: true, error: undefined });
 
     try {
-      const artifactNodes: StudioNode[] = [];
-      const artifactEdges: StudioEdge[] = [];
-
       for (const [index, item] of textItems.filter((entry) => entry.text.trim()).entries()) {
         const response = await fetch("/api/tts/voicedesign", {
           method: "POST",
@@ -588,8 +592,7 @@ function StudioApp() {
         }
 
         const artifactNode = createArtifactNode(designNode, payload, item.title);
-        artifactNodes.push(artifactNode);
-        artifactEdges.push({
+        const artifactEdge: StudioEdge = {
           id: createId("edge"),
           source: designNode.id,
           sourceHandle: "output",
@@ -598,11 +601,13 @@ function StudioApp() {
           type: "deletable",
           animated: true,
           style: { stroke: "#c5a45d", strokeWidth: 2 }
-        });
+        };
+
+        setNodes((items) => items.concat(artifactNode));
+        setEdges((items) => items.concat(artifactEdge));
       }
 
-      setNodes((items) => items.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, isRunning: false, error: undefined } } : node)).concat(artifactNodes));
-      setEdges((items) => items.concat(artifactEdges));
+      patchNode(nodeId, { isRunning: false, error: undefined });
     } catch (error) {
       patchNode(nodeId, { isRunning: false, error: error instanceof Error ? error.message : "请求失败。" });
     }
@@ -1335,6 +1340,7 @@ function ArtifactNode({ id, data }: NodeProps<StudioNode>) {
   return (
     <StudioNodeFrame id={id} data={data} icon={<Archive size={17} />} tone="artifact">
       <Handle type="target" position={Position.Left} id="artifact" className="node-handle" />
+      {artifact ? <Handle type="source" position={Position.Right} id="audio" className="node-handle handle-artifact-audio" /> : null}
       {artifact ? (
         <>
           <StudioAudioPlayer src={artifact.audioDataUrl} />
@@ -1647,12 +1653,32 @@ function resolveCloneInputs(cloneNode: StudioNode, nodes: StudioNode[], edges: S
   const voiceNode = getSource("voice");
   const instructionNode = getSource("instruction");
   const textNode = getSource("text");
+  const artifact = voiceNode?.data.artifact;
+  const artifactAudio: AudioAsset | undefined = artifact
+    ? {
+        fileName: artifact.fileName,
+        mimeType: guessMimeFromName(artifact.fileName),
+        size: dataUrlToUint8Array(artifact.audioDataUrl).byteLength,
+        dataUrl: artifact.audioDataUrl
+      }
+    : undefined;
 
   return {
-    audio: voiceNode?.data.audio ?? cloneNode.data.audio,
+    audio: voiceNode?.data.audio ?? artifactAudio ?? cloneNode.data.audio,
     instruction: instructionNode?.data.text ?? cloneNode.data.instruction ?? "",
     text: textNode?.data.text ?? cloneNode.data.text ?? ""
   };
+}
+
+function resolveCloneTextInputs(cloneNode: StudioNode, nodes: StudioNode[], edges: StudioEdge[]) {
+  return edges
+    .filter((edge) => edge.target === cloneNode.id && edge.targetHandle === "text")
+    .map((edge) => nodes.find((node) => node.id === edge.source && node.type === "prompt"))
+    .filter((node): node is StudioNode => Boolean(node))
+    .map((node) => ({
+      title: node.data.title,
+      text: String(node.data.text || "")
+    }));
 }
 
 function resolveVoiceDesignInputs(designNode: StudioNode, nodes: StudioNode[], edges: StudioEdge[]) {
