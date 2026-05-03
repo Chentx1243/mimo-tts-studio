@@ -521,41 +521,58 @@ function StudioApp() {
 
   async function generateCharacterVoice(charId: string) {
     if (!activeWorkspace || activeWorkspace.type !== "audiobook") return;
-    // 乐观更新
-    patchAudiobook({
-      characters: activeWorkspace.characters.map((c) =>
-        c.id === charId ? { ...c, voiceStatus: "generating" as AudiobookCharacter["voiceStatus"], voiceError: undefined } : c
-      )
+    const workspaceId = activeWorkspace.id;
+    setActiveWorkspace((workspace) => {
+      if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
+      return {
+        ...workspace,
+        characters: workspace.characters.map((c) =>
+          c.id === charId ? { ...c, voiceStatus: "generating" as AudiobookCharacter["voiceStatus"], voiceError: undefined } : c
+        )
+      };
     });
-    const response = await fetch(`/api/audiobook/${activeWorkspace.id}/characters/${charId}/voice`, {
+    const response = await fetch(`/api/audiobook/${workspaceId}/characters/${charId}/voice`, {
       method: "POST",
       headers: { "X-API-Key": apiKey, "X-API-Endpoint": apiEndpoint }
     });
     const result = (await response.json()) as { character?: AudiobookCharacter; error?: string };
     if (!response.ok) {
-      patchAudiobook({
-        characters: activeWorkspace.characters.map((c) =>
-          c.id === charId ? { ...c, voiceStatus: "error" as AudiobookCharacter["voiceStatus"], voiceError: result.error || "生成失败" } : c
-        )
+      setActiveWorkspace((workspace) => {
+        if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
+        return {
+          ...workspace,
+          characters: workspace.characters.map((c) =>
+            c.id === charId ? { ...c, voiceStatus: "error" as AudiobookCharacter["voiceStatus"], voiceError: result.error || "生成失败" } : c
+          )
+        };
       });
       return;
     }
-    patchAudiobook({
-      characters: activeWorkspace.characters.map((c) => (c.id === charId ? result.character! : c))
+    setActiveWorkspace((workspace) => {
+      if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
+      return {
+        ...workspace,
+        characters: workspace.characters.map((c) => (c.id === charId ? result.character! : c))
+      };
     });
   }
 
   async function deleteCharacterVoice(charId: string) {
     if (!activeWorkspace || activeWorkspace.type !== "audiobook") return;
-    const response = await fetch(`/api/audiobook/${activeWorkspace.id}/characters/${charId}/voice`, {
+    const workspaceId = activeWorkspace.id;
+    const response = await fetch(`/api/audiobook/${workspaceId}/characters/${charId}/voice`, {
       method: "DELETE"
     });
     const result = (await response.json()) as { character?: AudiobookCharacter; error?: string };
     if (!response.ok) {
       throw new Error(result.error || "删除音色失败");
     }
-    patchAudiobook({
-      characters: activeWorkspace.characters.map((c) => (c.id === charId ? result.character! : c))
+    setActiveWorkspace((workspace) => {
+      if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
+      return {
+        ...workspace,
+        characters: workspace.characters.map((c) => (c.id === charId ? result.character! : c))
+      };
     });
   }
 
@@ -1171,12 +1188,12 @@ function StudioApp() {
             apiKey={apiKey}
             apiEndpoint={apiEndpoint}
             onPatch={patchAudiobook}
-            onAnalyze={() => void analyzeAudiobookCharacters()}
+            onAnalyze={analyzeAudiobookCharacters}
             onGenerateVoice={(charId) => void generateCharacterVoice(charId)}
             onDeleteVoice={(charId) => void deleteCharacterVoice(charId)}
-            onAutoAnnotate={() => void autoAnnotateAudiobook()}
+            onAutoAnnotate={autoAnnotateAudiobook}
             onUpdateSegment={(segId, patch) => void updateAudiobookSegment(segId, patch)}
-            onGenerate={() => void generateAudiobookAudio()}
+            onGenerate={generateAudiobookAudio}
           />
         ) : (
           <section className="canvas-panel">
@@ -1598,12 +1615,12 @@ function AudiobookConsole({
   apiKey: string;
   apiEndpoint: string;
   onPatch: (patch: Partial<AudiobookWorkspacePayload>) => void;
-  onAnalyze: () => void;
+  onAnalyze: () => Promise<void>;
   onGenerateVoice: (charId: string) => void;
   onDeleteVoice: (charId: string) => void;
-  onAutoAnnotate: () => void;
+  onAutoAnnotate: () => Promise<void>;
   onUpdateSegment: (segId: string, patch: { characterId: string | null; characterName: string; emotion: string }) => void;
-  onGenerate: () => void;
+  onGenerate: () => Promise<void>;
 }) {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState(0);
@@ -1619,6 +1636,7 @@ function AudiobookConsole({
   const [generateProgress, setGenerateProgress] = useState(0);
   const [generateText, setGenerateText] = useState("");
   const progressTimerRef = useRef<number | null>(null);
+  const runningActionRef = useRef<"analyze" | "annotate" | "generate" | null>(null);
 
   const allVoicesReady = workspace.characters.length > 0 && workspace.characters.every((c) => c.voiceStatus === "ready");
   const hasAnnotations = workspace.segments.some((s) => s.characterId || s.characterName);
@@ -1662,6 +1680,10 @@ function AudiobookConsole({
   }
 
   async function handleAnalyze() {
+    if (runningActionRef.current) {
+      return;
+    }
+    runningActionRef.current = "analyze";
     setIsAnalyzing(true);
     setAnalyzeProgress(0);
     startProgress(setAnalyzeProgress, setAnalyzeText, [
@@ -1680,11 +1702,18 @@ function AudiobookConsole({
       stopProgress(0, setAnalyzeProgress);
       setAnalyzeText("分析失败，请重试");
     } finally {
-      setTimeout(() => setIsAnalyzing(false), 500);
+      setTimeout(() => {
+        runningActionRef.current = null;
+        setIsAnalyzing(false);
+      }, 500);
     }
   }
 
   async function handleAutoAnnotate() {
+    if (runningActionRef.current) {
+      return;
+    }
+    runningActionRef.current = "annotate";
     setIsAnnotating(true);
     setAnnotateProgress(0);
     startProgress(setAnnotateProgress, setAnnotateText, [
@@ -1703,11 +1732,18 @@ function AudiobookConsole({
       stopProgress(0, setAnnotateProgress);
       setAnnotateText("标注失败，请重试");
     } finally {
-      setTimeout(() => setIsAnnotating(false), 500);
+      setTimeout(() => {
+        runningActionRef.current = null;
+        setIsAnnotating(false);
+      }, 500);
     }
   }
 
   async function handleGenerate() {
+    if (runningActionRef.current) {
+      return;
+    }
+    runningActionRef.current = "generate";
     setIsGenerating(true);
     setGenerateProgress(0);
     const totalSegs = workspace.segments.length;
@@ -1726,7 +1762,10 @@ function AudiobookConsole({
       stopProgress(0, setGenerateProgress);
       setGenerateText("合成失败，请重试");
     } finally {
-      setTimeout(() => setIsGenerating(false), 500);
+      setTimeout(() => {
+        runningActionRef.current = null;
+        setIsGenerating(false);
+      }, 500);
     }
   }
 

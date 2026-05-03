@@ -1,7 +1,7 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import multer from "multer";
 
@@ -24,6 +24,8 @@ const allowedMimeTypes = new Set([
 const mimoEndpoint = "https://api.xiaomimimo.com/v1/chat/completions";
 const dataDir = path.resolve(process.env.MIMO_DATA_DIR || path.join(process.cwd(), "data"));
 const workspaceFilePath = path.join(dataDir, "workspaces.json");
+let workspaceWriteQueue: Promise<void> = Promise.resolve();
+let workspaceWriteSequence = 0;
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -799,9 +801,10 @@ app.post("/api/audiobook/:id/characters/:charId/voice", async (req, res, next) =
       return res.status(500).json({ error: "MIMO_API_KEY is not configured." });
     }
 
-    character.voiceStatus = "generating";
-    character.voiceError = undefined;
-    await writeWorkspaceStore(store);
+    await updateAudiobookCharacter(req.params.id, req.params.charId, (target) => {
+      target.voiceStatus = "generating";
+      target.voiceError = undefined;
+    });
 
     const testText = `大家好，我是${character.name}。很高兴认识你。`;
     const payload: MimoVoiceDesignPayload = {
@@ -821,26 +824,31 @@ app.post("/api/audiobook/:id/characters/:charId/voice", async (req, res, next) =
 
     const responseText = await upstreamResponse.text();
     if (!upstreamResponse.ok) {
-      character.voiceStatus = "error";
-      character.voiceError = `音色生成失败：HTTP ${upstreamResponse.status}`;
-      await writeWorkspaceStore(store);
-      return res.status(upstreamResponse.status).json({ error: character.voiceError, details: responseText });
+      const errorMessage = `音色生成失败：HTTP ${upstreamResponse.status}`;
+      const updatedCharacter = await updateAudiobookCharacter(req.params.id, req.params.charId, (target) => {
+        target.voiceStatus = "error";
+        target.voiceError = errorMessage;
+      });
+      return res.status(upstreamResponse.status).json({ error: updatedCharacter.voiceError, details: responseText });
     }
 
     const audioData = extractAudioData(parseJson(responseText));
     if (!audioData) {
-      character.voiceStatus = "error";
-      character.voiceError = "音色生成失败：响应中没有音频数据";
-      await writeWorkspaceStore(store);
-      return res.status(502).json({ error: character.voiceError });
+      const errorMessage = "音色生成失败：响应中没有音频数据";
+      const updatedCharacter = await updateAudiobookCharacter(req.params.id, req.params.charId, (target) => {
+        target.voiceStatus = "error";
+        target.voiceError = errorMessage;
+      });
+      return res.status(502).json({ error: updatedCharacter.voiceError });
     }
 
-    character.voiceDataUrl = `data:audio/wav;base64,${audioData}`;
-    character.voiceStatus = "ready";
-    workspace.updatedAt = new Date().toISOString();
-    await writeWorkspaceStore(store);
+    const updatedCharacter = await updateAudiobookCharacter(req.params.id, req.params.charId, (target) => {
+      target.voiceDataUrl = `data:audio/wav;base64,${audioData}`;
+      target.voiceStatus = "ready";
+      target.voiceError = undefined;
+    });
 
-    res.json({ character });
+    res.json({ character: updatedCharacter });
   } catch (error) {
     next(error);
   }
@@ -1696,6 +1704,11 @@ function createWorkflowEdge(source: string, sourceHandle: string, target: string
 }
 
 async function readWorkspaceStore(): Promise<WorkspaceStore> {
+  await workspaceWriteQueue;
+  return readWorkspaceStoreNow();
+}
+
+async function readWorkspaceStoreNow(): Promise<WorkspaceStore> {
   try {
     const raw = await readFile(workspaceFilePath, "utf-8");
     return normalizeWorkspaceStore(parseWorkspaceStore(raw));
@@ -1721,16 +1734,74 @@ async function readWorkspaceStore(): Promise<WorkspaceStore> {
         }
       ]
     };
-    await writeWorkspaceStore(initial);
+    await writeWorkspaceStoreNow(initial);
     return initial;
   }
 }
 
 async function writeWorkspaceStore(store: WorkspaceStore): Promise<void> {
+  const writeOperation = workspaceWriteQueue.then(() => writeWorkspaceStoreNow(store));
+  workspaceWriteQueue = writeOperation.catch(() => undefined);
+  return writeOperation;
+}
+
+async function writeWorkspaceStoreNow(store: WorkspaceStore): Promise<void> {
   await mkdir(dataDir, { recursive: true });
-  const tempPath = `${workspaceFilePath}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${workspaceFilePath}.${process.pid}.${Date.now()}.${workspaceWriteSequence++}.tmp`;
   await writeFile(tempPath, JSON.stringify(store, null, 2), "utf-8");
-  await rename(tempPath, workspaceFilePath);
+  try {
+    await renameWithRetry(tempPath, workspaceFilePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  const retryableCodes = new Set(["EPERM", "EACCES", "EBUSY"]);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = typeof error === "object" && error && "code" in error ? (error as { code?: string }).code : "";
+      if (!retryableCodes.has(code || "") || attempt === 7) {
+        throw error;
+      }
+      await delay(40 * (attempt + 1));
+    }
+  }
+}
+
+async function updateAudiobookCharacter(
+  workspaceId: string,
+  characterId: string,
+  update: (character: AudiobookCharacter, workspace: StoredAudiobookWorkspace) => void
+): Promise<AudiobookCharacter> {
+  const operation = workspaceWriteQueue.then(async () => {
+    const store = await readWorkspaceStoreNow();
+    const workspace = store.workspaces.find((w) => w.id === workspaceId);
+    if (!workspace || workspace.type !== "audiobook") {
+      throw Object.assign(new Error("Audiobook workspace not found."), { status: 404 });
+    }
+
+    const character = workspace.characters.find((c) => c.id === characterId);
+    if (!character) {
+      throw Object.assign(new Error("Audiobook character not found."), { status: 404 });
+    }
+
+    update(character, workspace);
+    workspace.updatedAt = new Date().toISOString();
+    await writeWorkspaceStoreNow(store);
+    return { ...character };
+  });
+
+  workspaceWriteQueue = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseWorkspaceStore(raw: string): { activeWorkspaceId?: string | null; workspaces?: Record<string, unknown>[] } {
