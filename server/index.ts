@@ -23,6 +23,7 @@ const allowedMimeTypes = new Set([
 ]);
 const mimoEndpoint = "https://api.xiaomimimo.com/v1/chat/completions";
 const dataDir = path.resolve(process.env.MIMO_DATA_DIR || path.join(process.cwd(), "data"));
+const workspacesDir = path.join(dataDir, "workspaces");
 const workspaceFilePath = path.join(dataDir, "workspaces.json");
 const audiobookProductTimeoutMs = 60000;
 let workspaceWriteQueue: Promise<void> = Promise.resolve();
@@ -177,6 +178,19 @@ type StoredWorkspace = StoredBoardWorkspace | StoredAudiobookWorkspace;
 type WorkspaceStore = {
   activeWorkspaceId: string | null;
   workspaces: StoredWorkspace[];
+};
+
+type WorkspaceIndexItem = {
+  id: string;
+  type: "board" | "audiobook";
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type WorkspaceIndex = {
+  activeWorkspaceId: string | null;
+  workspaces: WorkspaceIndexItem[];
 };
 
 app.use(cors());
@@ -1856,34 +1870,95 @@ async function readWorkspaceStore(): Promise<WorkspaceStore> {
 }
 
 async function readWorkspaceStoreNow(): Promise<WorkspaceStore> {
+  await mkdir(workspacesDir, { recursive: true });
+
+  // 尝试从新的单独文件结构读取
+  const indexPath = path.join(workspacesDir, "index.json");
+  try {
+    const raw = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(raw) as WorkspaceIndex;
+    const workspaces: StoredWorkspace[] = [];
+
+    for (const item of index.workspaces) {
+      const filePath = path.join(workspacesDir, `${item.id}.json`);
+      try {
+        const content = await readFile(filePath, "utf-8");
+        workspaces.push(normalizeStoredWorkspace(JSON.parse(content)));
+      } catch (error) {
+        const code = typeof error === "object" && error && "code" in error ? (error as { code?: string }).code : "";
+        if (code === "ENOENT") {
+          console.warn(`Workspace file not found: ${item.id}.json, skipping`);
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    return {
+      activeWorkspaceId: index.activeWorkspaceId,
+      workspaces
+    };
+  } catch (error) {
+    const code = typeof error === "object" && error && "code" in error ? (error as { code?: string }).code : "";
+    if (code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  // 如果新结构不存在，尝试从旧的单文件迁移
   try {
     const raw = await readFile(workspaceFilePath, "utf-8");
-    return normalizeWorkspaceStore(parseWorkspaceStore(raw));
+    const store = normalizeWorkspaceStore(parseWorkspaceStore(raw));
+    await migrateToNewStorage(store);
+    return store;
   } catch (error) {
     const code = typeof error === "object" && error && "code" in error ? (error as { code?: string }).code : "";
     if (code !== "ENOENT") {
       throw error;
     }
 
+    // 创建默认工作区
     const now = new Date().toISOString();
-    const initial: WorkspaceStore = {
-      activeWorkspaceId: "board-initial",
-      workspaces: [
-        {
-          id: "board-initial",
-          type: "board",
-          name: "默认工作台",
-          createdAt: now,
-          updatedAt: now,
-          nodes: [],
-          edges: [],
-          stashItems: []
-        }
-      ]
+    const initial: StoredBoardWorkspace = {
+      id: "board-initial",
+      type: "board",
+      name: "默认工作台",
+      createdAt: now,
+      updatedAt: now,
+      nodes: [],
+      edges: [],
+      stashItems: []
     };
-    await writeWorkspaceStoreNow(initial);
-    return initial;
+    const store: WorkspaceStore = {
+      activeWorkspaceId: "board-initial",
+      workspaces: [initial]
+    };
+    await migrateToNewStorage(store);
+    return store;
   }
+}
+
+async function migrateToNewStorage(store: WorkspaceStore): Promise<void> {
+  await mkdir(workspacesDir, { recursive: true });
+
+  // 保存每个工作区为单独文件
+  for (const workspace of store.workspaces) {
+    const filePath = path.join(workspacesDir, `${workspace.id}.json`);
+    await writeJsonFile(filePath, workspace);
+  }
+
+  // 保存索引文件
+  const index: WorkspaceIndex = {
+    activeWorkspaceId: store.activeWorkspaceId,
+    workspaces: store.workspaces.map((w) => ({
+      id: w.id,
+      type: w.type,
+      name: w.name,
+      createdAt: w.createdAt,
+      updatedAt: w.updatedAt
+    }))
+  };
+  await writeJsonFile(path.join(workspacesDir, "index.json"), index);
 }
 
 async function writeWorkspaceStore(store: WorkspaceStore): Promise<void> {
@@ -1893,11 +1968,33 @@ async function writeWorkspaceStore(store: WorkspaceStore): Promise<void> {
 }
 
 async function writeWorkspaceStoreNow(store: WorkspaceStore): Promise<void> {
-  await mkdir(dataDir, { recursive: true });
-  const tempPath = `${workspaceFilePath}.${process.pid}.${Date.now()}.${workspaceWriteSequence++}.tmp`;
-  await writeFile(tempPath, JSON.stringify(store, null, 2), "utf-8");
+  await mkdir(workspacesDir, { recursive: true });
+
+  // 保存每个工作区为单独文件
+  for (const workspace of store.workspaces) {
+    const filePath = path.join(workspacesDir, `${workspace.id}.json`);
+    await writeJsonFile(filePath, workspace);
+  }
+
+  // 保存索引文件
+  const index: WorkspaceIndex = {
+    activeWorkspaceId: store.activeWorkspaceId,
+    workspaces: store.workspaces.map((w) => ({
+      id: w.id,
+      type: w.type,
+      name: w.name,
+      createdAt: w.createdAt,
+      updatedAt: w.updatedAt
+    }))
+  };
+  await writeJsonFile(path.join(workspacesDir, "index.json"), index);
+}
+
+async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${workspaceWriteSequence++}.tmp`;
+  await writeFile(tempPath, JSON.stringify(data, null, 2), "utf-8");
   try {
-    await renameWithRetry(tempPath, workspaceFilePath);
+    await renameWithRetry(tempPath, filePath);
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => undefined);
     throw error;
