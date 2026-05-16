@@ -5,6 +5,7 @@ release/
 .env
 data/workspaces.json
 data/workspaces.json.*.tmp
+data/workspaces/index.json
 .DS_Store
 npm-debug.log*
 *.local

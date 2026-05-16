@@ -1310,6 +1310,95 @@ a.stash-round-action:hover {
   font-size: 13px;
 }
 
+.section-hint.inline {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chapter-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chapter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid rgba(197, 164, 93, 0.2);
+  border-radius: 6px;
+  background: rgba(20, 19, 16, 0.56);
+  color: #a09880;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chapter-tab.active {
+  border-color: rgba(197, 164, 93, 0.58);
+  background: rgba(197, 164, 93, 0.14);
+  color: #efe7cf;
+}
+
+.chapter-create-panel,
+.manual-character-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(197, 164, 93, 0.16);
+  border-radius: 8px;
+  background: rgba(20, 19, 16, 0.42);
+}
+
+.chapter-create-panel textarea,
+.manual-character-panel textarea,
+.chapter-create-panel input,
+.manual-character-panel input,
+.manual-character-panel select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(197, 164, 93, 0.24);
+  border-radius: 6px;
+  background: rgba(8, 8, 7, 0.42);
+  color: #efe7cf;
+  font-size: 12px;
+  outline: none;
+}
+
+.chapter-create-panel textarea,
+.manual-character-panel textarea {
+  grid-column: 1 / -1;
+  resize: vertical;
+  min-height: 64px;
+  line-height: 1.5;
+}
+
+.chapter-create-panel .run-button,
+.manual-character-panel .run-button {
+  width: auto;
+  margin-top: 0;
+  justify-self: start;
+}
+
+.upload-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(197, 164, 93, 0.3);
+  border-radius: 6px;
+  color: #a09880;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.upload-row input {
+  display: none;
+}
+
 .character-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -1354,6 +1443,13 @@ a.stash-round-action:hover {
   font-size: 11px;
   font-style: italic;
   line-height: 1.4;
+}
+
+.char-voice-sample {
+  margin: 6px 0 0;
+  color: #c5a45d;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .character-voice {

@@ -26,6 +26,7 @@ import {
   Archive,
   AudioLines,
   BookOpen,
+  BookPlus,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -58,6 +59,12 @@ type StatusResponse = {
   allowedMimeTypes: string[];
 };
 
+type ApiSettingsResponse = {
+  apiKey: string;
+  apiEndpoint: string;
+  configured: boolean;
+};
+
 type WorkspaceSummary = {
   id: string;
   name: string;
@@ -86,14 +93,24 @@ type BoardWorkspacePayload = {
 type AudiobookCharacter = {
   id: string;
   name: string;
+  roleType: "narrator" | "protagonist" | "supporting" | "custom";
+  aliases: string[];
+  voiceSource: "analysis" | "manualDesign" | "manualClone";
+  voiceMode: "designed" | "cloned";
+  isSystem?: boolean;
+  isVoiceLocked?: boolean;
   gender: string;
   age: string;
   voiceTraits: string;
   personality: string;
   voiceDescription: string;
+  voiceSampleText?: string;
   voiceDataUrl: string | null;
   voiceStatus: "pending" | "generating" | "ready" | "error";
   voiceError?: string;
+  referenceAudioDataUrl?: string;
+  referenceAudioFileName?: string;
+  referenceAudioMimeType?: string;
 };
 
 type AudiobookSegment = {
@@ -120,18 +137,32 @@ type AudiobookProduct = {
   synthesisMethod: "voiceClone" | "voiceDesign";
 };
 
+type AudiobookChapter = {
+  id: string;
+  title: string;
+  novelText: string;
+  characterHints: string;
+  segments: AudiobookSegment[];
+  products: AudiobookProduct[];
+  phase: "character-creation" | "annotation" | "generation";
+  createdAt: string;
+  updatedAt: string;
+};
+
 type AudiobookWorkspacePayload = {
   id: string;
   type: "audiobook";
   name: string;
   createdAt: string;
   updatedAt: string;
+  activeChapterId: string;
   novelText: string;
   characterHints: string;
   characters: AudiobookCharacter[];
   segments: AudiobookSegment[];
   products: AudiobookProduct[];
   phase: "character-creation" | "annotation" | "generation";
+  chapters: AudiobookChapter[];
 };
 
 type WorkspacePayload = BoardWorkspacePayload | AudiobookWorkspacePayload;
@@ -312,10 +343,8 @@ function StudioApp() {
 
   useEffect(() => {
     void loadStatus();
+    void loadApiSettings();
     void loadWorkspaceList();
-    if (!localStorage.getItem(API_KEY_STORAGE_KEY)) {
-      setShowApiKeyModal(true);
-    }
 
     const collapseTimer = window.setTimeout(() => {
       setTopbarCollapsed(true);
@@ -427,6 +456,40 @@ function StudioApp() {
     }
   }
 
+  async function loadApiSettings() {
+    try {
+      const response = await fetch("/api/settings");
+      if (!response.ok) {
+        throw new Error(`API 配置加载失败：HTTP ${response.status}`);
+      }
+
+      const settings = (await response.json()) as ApiSettingsResponse;
+      const localKey = localStorage.getItem(API_KEY_STORAGE_KEY) || "";
+      const localEndpoint = localStorage.getItem(API_ENDPOINT_STORAGE_KEY) || "";
+      const nextKey = settings.apiKey || localKey || DEFAULT_API_KEY;
+      const nextEndpoint = settings.apiEndpoint || localEndpoint || DEFAULT_API_ENDPOINT;
+
+      setApiKey(nextKey);
+      setApiEndpoint(nextEndpoint);
+      setApiKeyInput(nextKey);
+      setApiEndpointInput(nextEndpoint);
+
+      if (!settings.configured && localKey) {
+        void persistApiSettings(localKey, localEndpoint || nextEndpoint);
+        return;
+      }
+
+      if (!settings.configured && !localKey) {
+        setShowApiKeyModal(true);
+      }
+    } catch (error) {
+      console.warn("[settings] failed to load API settings", error);
+      if (!localStorage.getItem(API_KEY_STORAGE_KEY)) {
+        setShowApiKeyModal(true);
+      }
+    }
+  }
+
   function saveApiKey() {
     const trimmedKey = apiKeyInput.trim();
     const trimmedEndpoint = apiEndpointInput.trim();
@@ -440,8 +503,21 @@ function StudioApp() {
       setApiEndpoint(DEFAULT_API_ENDPOINT);
       localStorage.removeItem(API_ENDPOINT_STORAGE_KEY);
     }
+    void persistApiSettings(trimmedKey, trimmedEndpoint || DEFAULT_API_ENDPOINT);
     closeApiKeyModal();
     void loadStatus();
+  }
+
+  async function persistApiSettings(apiKey: string, apiEndpoint: string) {
+    try {
+      await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey, apiEndpoint })
+      });
+    } catch (error) {
+      console.warn("[settings] failed to persist API settings", error);
+    }
   }
 
   function openApiKeyModal() {
@@ -529,6 +605,51 @@ function StudioApp() {
     });
   }
 
+  async function addAudiobookChapter(data: { title: string; novelText: string; characterHints: string }) {
+    if (!activeWorkspace || activeWorkspace.type !== "audiobook") throw new Error("工作区状态异常");
+    const workspaceId = activeWorkspace.id;
+    const response = await fetch(`/api/audiobook/${workspaceId}/chapters`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": apiKey, "X-API-Endpoint": apiEndpoint },
+      body: JSON.stringify(data)
+    });
+    const result = (await response.json()) as { workspace?: AudiobookWorkspacePayload; error?: string };
+    if (!response.ok || !result.workspace) {
+      throw new Error(result.error || "新增章节失败");
+    }
+    setActiveWorkspace(result.workspace);
+  }
+
+  async function activateAudiobookChapter(chapterId: string) {
+    if (!activeWorkspace || activeWorkspace.type !== "audiobook") return;
+    const workspaceId = activeWorkspace.id;
+    const response = await fetch(`/api/audiobook/${workspaceId}/chapters/${chapterId}/activate`, {
+      method: "POST"
+    });
+    const result = (await response.json()) as { workspace?: AudiobookWorkspacePayload; error?: string };
+    if (!response.ok || !result.workspace) {
+      throw new Error(result.error || "切换章节失败");
+    }
+    setActiveWorkspace(result.workspace);
+  }
+
+  async function createAudiobookCharacter(formData: FormData) {
+    if (!activeWorkspace || activeWorkspace.type !== "audiobook") throw new Error("工作区状态异常");
+    const workspaceId = activeWorkspace.id;
+    const response = await fetch(`/api/audiobook/${workspaceId}/characters`, {
+      method: "POST",
+      body: formData
+    });
+    const result = (await response.json()) as { characters?: AudiobookCharacter[]; chapter?: AudiobookChapter; error?: string };
+    if (!response.ok) {
+      throw new Error(result.error || "创建音色角色失败");
+    }
+    setActiveWorkspace((workspace) => {
+      if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
+      return { ...workspace, characters: result.characters ?? workspace.characters };
+    });
+  }
+
   async function analyzeAudiobookCharacters() {
     if (!activeWorkspace || activeWorkspace.type !== "audiobook") throw new Error("工作区状态异常");
     const workspaceId = activeWorkspace.id;
@@ -536,13 +657,26 @@ function StudioApp() {
       method: "POST",
       headers: { "X-API-Key": apiKey, "X-API-Endpoint": apiEndpoint }
     });
-    const result = (await response.json()) as { characters?: AudiobookCharacter[]; error?: string };
+    const result = (await response.json()) as { characters?: AudiobookCharacter[]; chapter?: AudiobookChapter; error?: string };
     if (!response.ok) {
       throw new Error(result.error || "角色分析失败");
     }
     setActiveWorkspace((workspace) => {
       if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
-      return { ...workspace, characters: result.characters ?? [] };
+      if (!result.chapter) {
+        return { ...workspace, characters: result.characters ?? [] };
+      }
+      return {
+        ...workspace,
+        characters: result.characters ?? workspace.characters,
+        chapters: workspace.chapters.map((chapter) => (chapter.id === result.chapter!.id ? result.chapter! : chapter)),
+        activeChapterId: result.chapter.id,
+        novelText: result.chapter.novelText,
+        characterHints: result.chapter.characterHints,
+        segments: result.chapter.segments,
+        products: result.chapter.products,
+        phase: result.chapter.phase
+      };
     });
   }
 
@@ -610,12 +744,22 @@ function StudioApp() {
       method: "POST",
       headers: { "X-API-Key": apiKey, "X-API-Endpoint": apiEndpoint }
     });
-    const result = (await response.json()) as { segments?: AudiobookSegment[]; error?: string };
+    const result = (await response.json()) as { segments?: AudiobookSegment[]; chapter?: AudiobookChapter; error?: string };
     if (!response.ok) {
       throw new Error(result.error || "自动标注失败");
     }
     setActiveWorkspace((workspace) => {
       if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
+      if (result.chapter) {
+        return {
+          ...workspace,
+          chapters: workspace.chapters.map((chapter) => (chapter.id === result.chapter!.id ? result.chapter! : chapter)),
+          activeChapterId: result.chapter.id,
+          segments: result.chapter.segments,
+          products: result.chapter.products,
+          phase: result.chapter.phase
+        };
+      }
       return { ...workspace, segments: result.segments ?? [], phase: "annotation" };
     });
   }
@@ -635,7 +779,12 @@ function StudioApp() {
       if (!workspace || workspace.type !== "audiobook" || workspace.id !== activeWorkspace.id) return workspace;
       return {
         ...workspace,
-        segments: workspace.segments.map((s) => (s.id === segId ? result.segment! : s))
+        segments: workspace.segments.map((s) => (s.id === segId ? result.segment! : s)),
+        chapters: workspace.chapters.map((chapter) =>
+          chapter.id === workspace.activeChapterId
+            ? { ...chapter, segments: chapter.segments.map((s) => (s.id === segId ? result.segment! : s)) }
+            : chapter
+        )
       };
     });
   }
@@ -645,7 +794,13 @@ function StudioApp() {
     const workspaceId = activeWorkspace.id;
     setActiveWorkspace((workspace) => {
       if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
-      return { ...workspace, phase: "generation" };
+      return {
+        ...workspace,
+        phase: "generation",
+        chapters: workspace.chapters.map((chapter) =>
+          chapter.id === workspace.activeChapterId ? { ...chapter, phase: "generation" } : chapter
+        )
+      };
     });
     const response = await fetch(`/api/audiobook/${workspaceId}/generate`, {
       method: "POST",
@@ -657,7 +812,13 @@ function StudioApp() {
     }
     setActiveWorkspace((workspace) => {
       if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
-      return { ...workspace, products: result.products ?? [] };
+      return {
+        ...workspace,
+        products: result.products ?? [],
+        chapters: workspace.chapters.map((chapter) =>
+          chapter.id === workspace.activeChapterId ? { ...chapter, products: result.products ?? [] } : chapter
+        )
+      };
     });
     await pollAudiobookGeneration(workspaceId);
   }
@@ -673,6 +834,18 @@ function StudioApp() {
           product.id === productId
             ? { ...product, status: "generating" as AudiobookProduct["status"], audioDataUrl: null, error: undefined, elapsedMs: undefined }
             : product
+        ),
+        chapters: workspace.chapters.map((chapter) =>
+          chapter.id === workspace.activeChapterId
+            ? {
+                ...chapter,
+                products: chapter.products.map((product) =>
+                  product.id === productId
+                    ? { ...product, status: "generating" as AudiobookProduct["status"], audioDataUrl: null, error: undefined, elapsedMs: undefined }
+                    : product
+                )
+              }
+            : chapter
         )
       };
     });
@@ -687,7 +860,12 @@ function StudioApp() {
         if (!workspace || workspace.type !== "audiobook" || workspace.id !== workspaceId) return workspace;
         return {
           ...workspace,
-          products: workspace.products.map((product) => (product.id === productId ? result.product! : product))
+          products: workspace.products.map((product) => (product.id === productId ? result.product! : product)),
+          chapters: workspace.chapters.map((chapter) =>
+            chapter.id === workspace.activeChapterId
+              ? { ...chapter, products: chapter.products.map((product) => (product.id === productId ? result.product! : product)) }
+              : chapter
+          )
         };
       });
     }
@@ -749,11 +927,13 @@ function StudioApp() {
       if (activeWorkspace.type === "audiobook") {
         body = {
           name: activeWorkspace.name,
+          activeChapterId: activeWorkspace.activeChapterId,
           novelText: activeWorkspace.novelText,
           characterHints: activeWorkspace.characterHints,
           characters: activeWorkspace.characters,
           segments: activeWorkspace.segments,
           products: activeWorkspace.products,
+          chapters: activeWorkspace.chapters,
           phase: activeWorkspace.phase,
           baseUpdatedAt: activeWorkspace.updatedAt
         };
@@ -779,11 +959,7 @@ function StudioApp() {
       setActiveWorkspace((current) => {
         if (!current || current.id !== saved.id) return current;
         if (current.type === "audiobook" && saved.type === "audiobook") {
-          return {
-            ...current,
-            name: saved.name,
-            updatedAt: saved.updatedAt
-          };
+          return saved;
         }
         return saved;
       });
@@ -1311,6 +1487,9 @@ function StudioApp() {
             apiKey={apiKey}
             apiEndpoint={apiEndpoint}
             onPatch={patchAudiobook}
+            onAddChapter={addAudiobookChapter}
+            onActivateChapter={(chapterId) => void activateAudiobookChapter(chapterId)}
+            onCreateCharacter={createAudiobookCharacter}
             onAnalyze={analyzeAudiobookCharacters}
             onGenerateVoice={(charId) => void generateCharacterVoice(charId)}
             onDeleteVoice={(charId) => void deleteCharacterVoice(charId)}
@@ -1767,6 +1946,9 @@ function AudiobookConsole({
   apiKey,
   apiEndpoint,
   onPatch,
+  onAddChapter,
+  onActivateChapter,
+  onCreateCharacter,
   onAnalyze,
   onGenerateVoice,
   onDeleteVoice,
@@ -1780,6 +1962,9 @@ function AudiobookConsole({
   apiKey: string;
   apiEndpoint: string;
   onPatch: (patch: Partial<AudiobookWorkspacePayload>) => void;
+  onAddChapter: (data: { title: string; novelText: string; characterHints: string }) => Promise<void>;
+  onActivateChapter: (chapterId: string) => void;
+  onCreateCharacter: (formData: FormData) => Promise<void>;
   onAnalyze: () => Promise<void>;
   onGenerateVoice: (charId: string) => void;
   onDeleteVoice: (charId: string) => void;
@@ -1799,6 +1984,18 @@ function AudiobookConsole({
   const [annotateProgress, setAnnotateProgress] = useState(0);
   const [annotateText, setAnnotateText] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+  const [chapterTitle, setChapterTitle] = useState("");
+  const [chapterText, setChapterText] = useState("");
+  const [chapterHints, setChapterHints] = useState("");
+  const [isAddingChapter, setIsAddingChapter] = useState(false);
+  const [characterName, setCharacterName] = useState("");
+  const [characterRoleType, setCharacterRoleType] = useState<AudiobookCharacter["roleType"]>("supporting");
+  const [characterVoiceMode, setCharacterVoiceMode] = useState<AudiobookCharacter["voiceMode"]>("designed");
+  const [characterDescription, setCharacterDescription] = useState("");
+  const [characterTraits, setCharacterTraits] = useState("");
+  const [characterAliases, setCharacterAliases] = useState("");
+  const [characterVoiceFile, setCharacterVoiceFile] = useState<File | null>(null);
+  const [isCreatingCharacter, setIsCreatingCharacter] = useState(false);
   const productSectionRef = useRef<HTMLDivElement | null>(null);
   const progressTimerRef = useRef<number | null>(null);
   const runningActionRef = useRef<"analyze" | "annotate" | "generate" | null>(null);
@@ -1808,6 +2005,8 @@ function AudiobookConsole({
   const hasUsedAutoAnnotation = workspace.segments.some((s) => s.isAutoAnnotated);
   const showProductSection = isGenerating || workspace.phase === "generation" || workspace.products.length > 0;
   const allProductsReady = workspace.products.length > 0 && workspace.products.every((product) => product.status === "ready" && product.audioDataUrl);
+  const activeChapter = workspace.chapters.find((chapter) => chapter.id === workspace.activeChapterId) ?? workspace.chapters[0];
+  const narrator = workspace.characters.find((character) => character.roleType === "narrator");
 
   useEffect(() => {
     if (!isGenerating) {
@@ -1939,6 +2138,54 @@ function AudiobookConsole({
     await onRetryProduct(productId);
   }
 
+  async function handleAddChapter() {
+    if (!chapterText.trim() || isAddingChapter) {
+      return;
+    }
+    setIsAddingChapter(true);
+    try {
+      await onAddChapter({
+        title: chapterTitle.trim() || `章节 ${workspace.chapters.length + 1}`,
+        novelText: chapterText,
+        characterHints: chapterHints
+      });
+      setChapterTitle("");
+      setChapterText("");
+      setChapterHints("");
+    } finally {
+      setIsAddingChapter(false);
+    }
+  }
+
+  async function handleCreateCharacter() {
+    if (!characterName.trim() || isCreatingCharacter) {
+      return;
+    }
+    setIsCreatingCharacter(true);
+    try {
+      const formData = new FormData();
+      formData.append("name", characterName.trim());
+      formData.append("roleType", characterRoleType);
+      formData.append("aliases", characterAliases);
+      formData.append("voiceTraits", characterTraits);
+      formData.append("voiceDescription", characterDescription);
+      formData.append("personality", characterTraits || characterDescription);
+      if (characterVoiceMode === "cloned" && characterVoiceFile) {
+        formData.append("voice", characterVoiceFile);
+      }
+      await onCreateCharacter(formData);
+      setCharacterName("");
+      setCharacterRoleType("supporting");
+      setCharacterVoiceMode("designed");
+      setCharacterDescription("");
+      setCharacterTraits("");
+      setCharacterAliases("");
+      setCharacterVoiceFile(null);
+    } finally {
+      setIsCreatingCharacter(false);
+    }
+  }
+
   async function downloadAudiobookProductsZip() {
     if (!allProductsReady) {
       return;
@@ -1969,7 +2216,7 @@ function AudiobookConsole({
     const seg = workspace.segments.find((s) => s.id === segId);
     if (seg) {
       setEditingSegId(segId);
-      setEditCharId(seg.characterId || "");
+      setEditCharId(seg.characterId || narrator?.id || "");
       setEditEmotion(seg.emotion);
     }
   }
@@ -1978,7 +2225,7 @@ function AudiobookConsole({
     if (!editingSegId) return;
     const char = workspace.characters.find((c) => c.id === editCharId);
     onUpdateSegment(editingSegId, {
-      characterId: editCharId || null,
+      characterId: editCharId || narrator?.id || null,
       characterName: char?.name || "旁白",
       emotion: editEmotion
     });
@@ -2000,6 +2247,88 @@ function AudiobookConsole({
       </div>
 
       <div className="audiobook-body">
+        <div className="audiobook-section">
+          <div className="section-header">
+            <h3>章节项目</h3>
+            <span className="section-hint inline">当前：{activeChapter?.title || "未命名章节"}</span>
+          </div>
+          <div className="chapter-tabs">
+            {workspace.chapters.map((chapter, index) => (
+              <button
+                key={chapter.id}
+                type="button"
+                className={chapter.id === workspace.activeChapterId ? "chapter-tab active" : "chapter-tab"}
+                onClick={() => onActivateChapter(chapter.id)}
+              >
+                <BookOpen size={13} />
+                {chapter.title || `章节 ${index + 1}`}
+              </button>
+            ))}
+          </div>
+          <div className="chapter-create-panel">
+            <input
+              value={chapterTitle}
+              onChange={(event) => setChapterTitle(event.target.value)}
+              placeholder={`章节 ${workspace.chapters.length + 1}`}
+            />
+            <textarea
+              value={chapterText}
+              onChange={(event) => setChapterText(event.target.value)}
+              placeholder="粘贴下一章或新的小说片段，系统会加入当前书籍项目并复用音色库"
+              rows={4}
+            />
+            <textarea
+              value={chapterHints}
+              onChange={(event) => setChapterHints(event.target.value)}
+              placeholder="可选：本章新增人物说明，每行一个角色"
+              rows={2}
+            />
+            <button className="run-button" type="button" onClick={() => void handleAddChapter()} disabled={isAddingChapter || !chapterText.trim()}>
+              {isAddingChapter ? <Loader2 className="spin" size={14} /> : <BookPlus size={14} />}
+              {isAddingChapter ? "新增中..." : "添加章节"}
+            </button>
+          </div>
+        </div>
+
+        <div className="audiobook-section">
+          <div className="section-header">
+            <h3>书籍音色库</h3>
+            {narrator ? <span className="section-hint inline">旁白：{narrator.voiceStatus === "ready" ? "已准备" : "待生成"}</span> : null}
+          </div>
+          <div className="manual-character-panel">
+            <input value={characterName} onChange={(event) => setCharacterName(event.target.value)} placeholder="音色角色名称，如：主角 / 特邀主播A" />
+            <select value={characterRoleType} onChange={(event) => setCharacterRoleType(event.target.value as AudiobookCharacter["roleType"])}>
+              <option value="protagonist">主角</option>
+              <option value="supporting">配角</option>
+              <option value="narrator">旁白</option>
+              <option value="custom">自定义</option>
+            </select>
+            <select value={characterVoiceMode} onChange={(event) => setCharacterVoiceMode(event.target.value as AudiobookCharacter["voiceMode"])}>
+              <option value="designed">自然语言音色设计</option>
+              <option value="cloned">上传参考音频克隆</option>
+            </select>
+            <input value={characterAliases} onChange={(event) => setCharacterAliases(event.target.value)} placeholder="别名/称呼，可用逗号分隔" />
+            <textarea value={characterTraits} onChange={(event) => setCharacterTraits(event.target.value)} placeholder="性格、身份、声音特点" rows={2} />
+            {characterVoiceMode === "designed" ? (
+              <textarea value={characterDescription} onChange={(event) => setCharacterDescription(event.target.value)} placeholder="音色描述：男女老少、声音质感、气质等" rows={2} />
+            ) : (
+              <label className="upload-row">
+                <FileAudio size={14} />
+                <span>{characterVoiceFile ? characterVoiceFile.name : "上传参考音频"}</span>
+                <input
+                  type="file"
+                  accept="audio/mpeg,audio/mp3,audio/mp4,audio/m4a,audio/wav,audio/wave,video/mp4"
+                  onChange={(event) => setCharacterVoiceFile(event.target.files?.[0] ?? null)}
+                />
+              </label>
+            )}
+            <button className="run-button" type="button" onClick={() => void handleCreateCharacter()} disabled={isCreatingCharacter || !characterName.trim()}>
+              {isCreatingCharacter ? <Loader2 className="spin" size={14} /> : <Plus size={14} />}
+              {isCreatingCharacter ? "创建中..." : "创建音色角色"}
+            </button>
+          </div>
+        </div>
+
         {/* 角色创造区域 */}
         <div className="audiobook-section">
           <div className="section-header">
@@ -2034,6 +2363,7 @@ function AudiobookConsole({
                   {char.age && <span className="char-tag">{char.age}</span>}
                   <p className="char-personality">{char.personality}</p>
                   <p className="char-voice-desc">{char.voiceDescription}</p>
+                  {char.voiceSampleText && <p className="char-voice-sample">试听：{char.voiceSampleText}</p>}
                 </div>
                 <div className="character-voice">
                   {char.voiceStatus === "ready" && char.voiceDataUrl ? (
@@ -2113,7 +2443,6 @@ function AudiobookConsole({
                   {editingSegId === seg.id && (
                     <div className="segment-editor">
                       <select value={editCharId} onChange={(e) => setEditCharId(e.target.value)}>
-                        <option value="">旁白</option>
                         {workspace.characters.map((c) => (
                           <option key={c.id} value={c.id}>{c.name}</option>
                         ))}
