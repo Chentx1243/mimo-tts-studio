@@ -1,4 +1,4 @@
-# MiMo 铸光音频工作站
+# 音频工作站
 
 基于节点连线的可视化音频工作站，使用小米 MiMo TTS API 实现语音克隆与语音设计。
 
@@ -130,4 +130,4 @@ mimo/
 
 ## License
 
-Private
+该项目基于小米Mimo模型提供核心能力，并非Mimo品牌或小米产品；项目完全由ClaudeCode+mimo-v2.5-pro编写，无人工编写成分。
