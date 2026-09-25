@@ -21,7 +21,7 @@ const allowedMimeTypes = new Set([
   "audio/wave",
   "video/mp4"
 ]);
-const mimoEndpoint = "https://api.xiaomimimo.com/v1/chat/completions";
+const mimoEndpoint = process.env.MIMO_API_ENDPOINT || "https://api.xiaomimimo.com/v1/chat/completions";
 const dataDir = path.resolve(process.env.MIMO_DATA_DIR || path.join(process.cwd(), "data"));
 const workspacesDir = path.join(dataDir, "workspaces");
 const workspaceFilePath = path.join(dataDir, "workspaces.json");
