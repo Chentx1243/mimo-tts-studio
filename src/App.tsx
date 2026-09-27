@@ -37,10 +37,12 @@ import {
   Mic2,
   Pause,
   PanelTop,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
   Save,
+  Settings2,
   Sparkles,
   Square,
   Trash2,
@@ -246,7 +248,7 @@ const nodeCatalog: Record<
   prompt: {
     label: "提示词",
     description: "要生成成音频的文本内容",
-    defaultData: () => ({ title: "提示词", text: "今天我们完成了铸光音频工作站的第一条生成链路，现在用这段声音检查相似度、节奏和情绪表现。" })
+    defaultData: () => ({ title: "提示词", text: "今天我们完成了SEEK音频工作站的第一条生成链路，现在用这段声音检查相似度、节奏和情绪表现。" })
   },
   voiceClone: {
     label: "音频克隆",
@@ -254,7 +256,7 @@ const nodeCatalog: Record<
     defaultData: () => ({
       title: "音频克隆",
       instruction: "自然、清晰、略带播客讲述感，语速中等，语气友好但不过分夸张。",
-      text: "今天我们完成了铸光音频工作站的第一条生成链路，现在用这段声音检查相似度、节奏和情绪表现。"
+      text: "今天我们完成了SEEK音频工作站的第一条生成链路，现在用这段声音检查相似度、节奏和情绪表现。"
     })
   },
   voiceDesign: {
@@ -283,6 +285,7 @@ const DEFAULT_API_KEY = "sk-cbpjuoes34akq38omkqz9s08s7h9dxwe7cjshz5824kskliz";
 const DEFAULT_API_ENDPOINT = "https://api.xiaomimimo.com/v1/chat/completions";
 const API_KEY_STORAGE_KEY = "mimo-api-key";
 const API_ENDPOINT_STORAGE_KEY = "mimo-api-endpoint";
+const THEME_STORAGE_KEY = "seek-theme";
 
 const allowedAudioTypes = new Set(["audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "video/mp4"]);
 const maxAudioBytes = Math.floor(7.5 * 1024 * 1024);
@@ -303,6 +306,10 @@ function StudioApp() {
   const [nodes, setNodes, onNodesChange] = useNodesState<StudioNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<StudioEdge>([]);
   const [menu, setMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
+  const [workspaceMenu, setWorkspaceMenu] = useState<{ x: number; y: number; workspaceId: string; workspaceName: string } | null>(null);
+  const [pendingWorkspaceDelete, setPendingWorkspaceDelete] = useState<{ workspaceId: string; workspaceName: string } | null>(null);
+  const [isDeletingWorkspace, setIsDeletingWorkspace] = useState(false);
+  const [isWorkspaceNameEditing, setIsWorkspaceNameEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isStashOpen, setIsStashOpen] = useState(false);
   const [boardDialog, setBoardDialog] = useState<"choice" | "smart" | "audiobook" | null>(null);
@@ -313,10 +320,12 @@ function StudioApp() {
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [apiEndpointInput, setApiEndpointInput] = useState(apiEndpoint);
-  const [topbarCollapsed, setTopbarCollapsed] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark" | "classic">(() => {
+    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+    return savedTheme === "dark" || savedTheme === "classic" ? savedTheme : "light";
+  });
   const [showDefaultKeyWarning, setShowDefaultKeyWarning] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const topbarHoverTimerRef = useRef<number | null>(null);
 
   const autoSaveKey = useMemo(() => {
     if (!activeWorkspace) return "";
@@ -345,27 +354,12 @@ function StudioApp() {
     void loadStatus();
     void loadApiSettings();
     void loadWorkspaceList();
-
-    const collapseTimer = window.setTimeout(() => {
-      setTopbarCollapsed(true);
-    }, 5000);
-
-    return () => window.clearTimeout(collapseTimer);
   }, []);
 
   useEffect(() => {
-    function handleMouseMove(e: globalThis.MouseEvent) {
-      if (e.clientY < 20) {
-        setTopbarCollapsed(false);
-        if (topbarHoverTimerRef.current) {
-          window.clearTimeout(topbarHoverTimerRef.current);
-        }
-      }
-    }
-
-    document.addEventListener("mousemove", handleMouseMove);
-    return () => document.removeEventListener("mousemove", handleMouseMove);
-  }, []);
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!activeWorkspace) {
@@ -413,15 +407,20 @@ function StudioApp() {
   }, [nodes, nodeCallbacks]);
 
   const hydratedEdges = useMemo(() => {
+    const themeStroke = theme === "light" ? "#2563eb" : theme === "dark" ? "#60a5fa" : "#c5a45d";
     return edges.map((edge) => ({
       ...edge,
       type: "deletable",
+      style: {
+        ...edge.style,
+        stroke: themeStroke
+      },
       data: {
         ...edge.data,
         onDeleteEdge: deleteEdge
       }
     }));
-  }, [edges]);
+  }, [edges, theme]);
 
   const nodeTypes = useMemo<NodeTypes>(
     () => ({
@@ -528,7 +527,6 @@ function StudioApp() {
 
   function closeApiKeyModal() {
     setShowApiKeyModal(false);
-    topbarHoverTimerRef.current = window.setTimeout(() => setTopbarCollapsed(true), 3000);
   }
 
   async function loadWorkspaceList(preferredId?: string) {
@@ -904,16 +902,38 @@ function StudioApp() {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
-  async function deleteWorkspace() {
-    if (!activeWorkspace || !window.confirm(`删除「${activeWorkspace.name}」？`)) {
-      return;
-    }
+  function requestWorkspaceDelete(workspaceId: string, workspaceName: string) {
+    setWorkspaceMenu(null);
+    setPendingWorkspaceDelete({ workspaceId, workspaceName });
+  }
 
-    await fetch(`/api/workspaces/${activeWorkspace.id}`, { method: "DELETE" });
-    setActiveWorkspace(null);
-    setNodes([]);
-    setEdges([]);
-    await loadWorkspaceList();
+  async function confirmWorkspaceDelete() {
+    if (!pendingWorkspaceDelete || isDeletingWorkspace) return;
+    const { workspaceId } = pendingWorkspaceDelete;
+    setIsDeletingWorkspace(true);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`删除画板失败：HTTP ${response.status}`);
+      }
+      if (activeWorkspace?.id === workspaceId) {
+        setActiveWorkspace(null);
+        setNodes([]);
+        setEdges([]);
+      }
+      setPendingWorkspaceDelete(null);
+      await loadWorkspaceList();
+    } finally {
+      setIsDeletingWorkspace(false);
+    }
+  }
+
+  async function beginWorkspaceRename(workspaceId: string) {
+    setWorkspaceMenu(null);
+    if (activeWorkspace?.id !== workspaceId) {
+      await loadWorkspace(workspaceId);
+    }
+    setIsWorkspaceNameEditing(true);
   }
 
   async function saveWorkspace() {
@@ -1320,37 +1340,24 @@ function StudioApp() {
   }
 
   return (
-    <main className="studio-shell" onClick={() => setMenu(null)}>
-      <header
-        className={`studio-topbar ${topbarCollapsed ? "collapsed" : ""}`}
-        onMouseEnter={() => {
-          if (topbarHoverTimerRef.current) {
-            window.clearTimeout(topbarHoverTimerRef.current);
-          }
-        }}
-        onMouseLeave={() => {
-          if (!showApiKeyModal) {
-            topbarHoverTimerRef.current = window.setTimeout(() => setTopbarCollapsed(true), 2000);
-          }
-        }}
-      >
+    <main
+      className="studio-shell"
+      onClick={() => {
+        setMenu(null);
+        setWorkspaceMenu(null);
+      }}
+    >
+      <header className="studio-topbar">
         <div className="brand-block">
-          <span className="brand-kicker">ZHUGUANG AUDIO WORKSTATION</span>
-          <h1>铸光音频工作站</h1>
-        </div>
-        <div className="topbar-actions">
-          <StatusPill apiKey={apiKey} onOpenModal={openApiKeyModal} />
-          <button type="button" onClick={() => void saveWorkspace()}>
-            <Save size={16} />
-            {isSaving ? "保存中" : "保存"}
-          </button>
+          <span className="brand-kicker">SEEK AUDIO WORKSTATION</span>
+          <h1>SEEK音频工作站</h1>
         </div>
       </header>
 
       {apiKey === DEFAULT_API_KEY && showDefaultKeyWarning ? (
         <section className="api-warning">
           <AlertTriangle size={18} />
-          <span>当前使用的是默认 API Key，不保证长期可用。请点击右上角 API Key 区域配置自己的密钥。</span>
+          <span>当前使用的是默认 API Key，不保证长期可用。请在左侧画板库的“设置”中配置自己的密钥。</span>
           <button className="api-warning-close" type="button" onClick={() => setShowDefaultKeyWarning(false)}>
             <X size={16} />
           </button>
@@ -1363,13 +1370,35 @@ function StudioApp() {
             <div className="api-key-modal-header">
               <h3>
                 <Key size={18} />
-                配置 API Key
+                设置
               </h3>
               <button className="api-key-modal-close" type="button" onClick={closeApiKeyModal}>
                 <X size={18} />
               </button>
             </div>
             <div className="api-key-modal-body">
+              <section className="settings-section">
+                <div>
+                  <strong>外观主题</strong>
+                  <p>浅色与深色采用简洁的现代界面；经典保留原有金色渐变风格。</p>
+                </div>
+                <div className="theme-options" role="radiogroup" aria-label="外观主题">
+                  <button type="button" className={theme === "light" ? "theme-option active" : "theme-option"} onClick={() => setTheme("light")}>
+                    <span className="theme-swatch light" />浅色
+                  </button>
+                  <button type="button" className={theme === "dark" ? "theme-option active" : "theme-option"} onClick={() => setTheme("dark")}>
+                    <span className="theme-swatch dark" />深色
+                  </button>
+                  <button type="button" className={theme === "classic" ? "theme-option active" : "theme-option"} onClick={() => setTheme("classic")}>
+                    <span className="theme-swatch classic" />经典
+                  </button>
+                </div>
+              </section>
+              <section className="settings-section api-settings-section">
+                <div>
+                  <strong>MiMo API</strong>
+                  <p>配置 API Key 与服务地址。</p>
+                </div>
               <p className="api-key-modal-hint">
                 请输入您的 MiMo API Key。可前往{" "}
                 <a href="https://platform.xiaomimimo.com/" target="_blank" rel="noopener noreferrer">
@@ -1378,11 +1407,12 @@ function StudioApp() {
                 获取。
               </p>
               <input
-                type="text"
+                type="password"
                 className="api-key-input"
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 placeholder="sk-..."
+                autoComplete="off"
                 spellCheck={false}
               />
               {apiKey === DEFAULT_API_KEY && (
@@ -1410,6 +1440,7 @@ function StudioApp() {
                   非套餐请保持默认
                 </p>
               </div>
+              </section>
             </div>
             <div className="api-key-modal-footer">
               <button type="button" className="api-key-btn-cancel" onClick={closeApiKeyModal}>
@@ -1450,6 +1481,16 @@ function StudioApp() {
                       className={workspace.id === activeWorkspace?.id ? "board-item active" : "board-item"}
                       type="button"
                       onClick={() => void loadWorkspace(workspace.id)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setWorkspaceMenu({
+                          x: event.clientX,
+                          y: event.clientY,
+                          workspaceId: workspace.id,
+                          workspaceName: workspace.name
+                        });
+                      }}
                     >
                       <strong>
                         {workspace.type === "audiobook" ? <BookOpen size={14} style={{ marginRight: 6, verticalAlign: "middle" }} /> : null}
@@ -1473,9 +1514,9 @@ function StudioApp() {
                   </div>
                 ))}
               </div>
-              <button className="danger subtle" type="button" onClick={() => void deleteWorkspace()} disabled={!activeWorkspace}>
-                <Trash2 size={16} />
-                删除当前画板
+              <button className="sidebar-settings" type="button" onClick={openApiKeyModal}>
+                <Settings2 size={16} />
+                设置
               </button>
             </>
           )}
@@ -1502,13 +1543,41 @@ function StudioApp() {
         ) : (
           <section className="canvas-panel">
             <div className="canvas-titlebar">
-              <input
-                value={activeWorkspace?.name ?? ""}
-                onChange={(event) => patchWorkspaceName(event.target.value)}
-                onBlur={() => void saveWorkspace()}
-                placeholder="未命名工作台"
-              />
+              {isWorkspaceNameEditing ? (
+                <input
+                  autoFocus
+                  className="workspace-title-input"
+                  style={{ width: `${Math.min(360, Math.max(96, Array.from(activeWorkspace?.name || "未命名工作台").length * 17 + 22))}px` }}
+                  value={activeWorkspace?.name ?? ""}
+                  onChange={(event) => patchWorkspaceName(event.target.value)}
+                  onBlur={() => {
+                    setIsWorkspaceNameEditing(false);
+                    void saveWorkspace();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                  placeholder="未命名工作台"
+                />
+              ) : (
+                <button
+                  className="workspace-title-display"
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (activeWorkspace) setIsWorkspaceNameEditing(true);
+                  }}
+                  title="点击重命名"
+                  disabled={!activeWorkspace}
+                >
+                  {activeWorkspace?.name || "未命名工作台"}
+                </button>
+              )}
               <span>右键画布添加节点，拖动端口建立连接</span>
+              <button className="workspace-save" type="button" onClick={() => void saveWorkspace()} disabled={!activeWorkspace || isSaving}>
+                <Save size={16} />
+                {isSaving ? "保存中" : "保存"}
+              </button>
             </div>
             <div className="flow-wrap" onContextMenu={openContextMenu}>
               <ReactFlow<StudioNode, StudioEdge>
@@ -1525,15 +1594,78 @@ function StudioApp() {
                 fitView
                 proOptions={{ hideAttribution: true }}
               >
-                <Background color="#3f3a2d" gap={34} size={1.2} variant={BackgroundVariant.Dots} />
+                <Background
+                  color={theme === "light" ? "#cbd5e1" : theme === "dark" ? "#334155" : "#3f3a2d"}
+                  gap={34}
+                  size={1.2}
+                  variant={BackgroundVariant.Dots}
+                />
                 <Controls />
-                <MiniMap pannable zoomable nodeColor="#c5a45d" maskColor="rgba(8, 8, 7, 0.72)" />
+                <MiniMap
+                  pannable
+                  zoomable
+                  nodeColor={theme === "light" ? "#2563eb" : theme === "dark" ? "#60a5fa" : "#c5a45d"}
+                  bgColor={theme === "light" ? "#ffffff" : theme === "dark" ? "#111827" : "#0e0e0c"}
+                  maskColor={theme === "light" ? "rgba(226, 232, 240, 0.58)" : theme === "dark" ? "rgba(15, 23, 42, 0.6)" : "rgba(8, 8, 7, 0.72)"}
+                />
               </ReactFlow>
               {menu ? <ContextMenu menu={menu} onAdd={addNode} /> : null}
             </div>
           </section>
         )}
       </section>
+
+      {workspaceMenu ? (
+        <div
+          className="context-menu workspace-context-menu"
+          style={{ left: workspaceMenu.x, top: workspaceMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button type="button" onClick={() => void beginWorkspaceRename(workspaceMenu.workspaceId)}>
+            <Pencil size={15} />
+            <span>重命名画板</span>
+          </button>
+          <button
+            className="danger"
+            type="button"
+            onClick={() => requestWorkspaceDelete(workspaceMenu.workspaceId, workspaceMenu.workspaceName)}
+          >
+            <Trash2 size={15} />
+            <span>删除画板</span>
+          </button>
+        </div>
+      ) : null}
+      {pendingWorkspaceDelete ? (
+        <div className="delete-confirm-backdrop" role="presentation" onClick={() => setPendingWorkspaceDelete(null)}>
+          <section
+            className="delete-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-workspace-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="delete-confirm-icon" aria-hidden="true">
+              <Trash2 size={22} />
+            </div>
+            <div className="delete-confirm-copy">
+              <h3 id="delete-workspace-title">删除画板？</h3>
+              <p>
+                即将删除「<strong>{pendingWorkspaceDelete.workspaceName}</strong>」，画板中的节点、连线与暂存内容都将被移除。
+              </p>
+              <p className="delete-confirm-warning">此操作无法恢复。</p>
+            </div>
+            <div className="delete-confirm-actions">
+              <button type="button" onClick={() => setPendingWorkspaceDelete(null)} disabled={isDeletingWorkspace}>
+                取消
+              </button>
+              <button className="delete-confirm-submit" type="button" onClick={() => void confirmWorkspaceDelete()} disabled={isDeletingWorkspace}>
+                {isDeletingWorkspace ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
+                {isDeletingWorkspace ? "删除中" : "确认删除"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {boardDialog ? (
         <BoardCreateDialog
           mode={boardDialog}
